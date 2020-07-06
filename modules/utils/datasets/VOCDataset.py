@@ -8,6 +8,7 @@ import os
 import torch
 import random
 import numpy as np
+import torch.nn.functional as F
 import xml.etree.ElementTree as ET
 from scipy.io import loadmat
 from PIL import Image, ImageOps
@@ -40,9 +41,10 @@ class VOCDataset(Dataset):
         'train': 18,
         'tvmonitor': 19
     }
-    def __init__(self, dataset_cfg, proposals_filepath, mode, **kwargs):
+    def __init__(self, dataset_cfg, proposals_cfg, mode, **kwargs):
         self.dataset_cfg = dataset_cfg
-        self.imageids, self.proposals, self.proposals_scores = self.parseMATFile(proposals_filepath)
+        self.proposals_cfg = proposals_cfg
+        self.imageids, self.proposals, self.proposals_scores = self.parseMATFile(proposals_cfg['proposals_filepath'])
         self.mode = mode
         assert self.mode in ['TRAIN', 'TEST']
         if dataset_cfg['type'] == 'VOC07':
@@ -54,21 +56,31 @@ class VOCDataset(Dataset):
         if mode == 'TRAIN':
             self.image_ratios, self.imageids, self.imagepaths, self.annotations_paths, self.proposals, self.proposals_scores = \
                     self.filterImages(self.imageids, self.imagepaths, self.annotations_paths, self.proposals, self.proposals_scores)
+        self.max_image_size = None
+        self.num_iters = 0
     '''get item'''
     def __getitem__(self, index):
         # proposals: (x_min, y_min, x_max, y_max)
         proposals = self.proposals[index].astype(np.float32)
         proposals = np.stack((proposals[:, 1], proposals[:, 0], proposals[:, 3], proposals[:, 2]), axis=1)
         # filter small proposals
-        mask = filterSmallBoxes(boxes, 20)
+        mask = filterSmallBoxes(proposals, 20)
         proposals = proposals[mask]
         # proposal scores: (num_proposals, 1)
         proposals_scores = self.proposals_scores[index].astype(np.float32)
         proposals_scores = proposals_scores[mask]
+        # select topk
+        topk = np.argsort(proposals_scores.reshape(-1), axis=0)[-self.proposals_cfg['num_proposals']:]
+        while topk.shape[0] < self.proposals_cfg['num_proposals']:
+            random_index = np.random.permutation(np.arange(topk.shape[0]))[:self.proposals_cfg['num_proposals']-topk.shape[0]]
+            topk = np.concatenate([topk, topk[random_index]], axis=0)
+        topk = np.random.permutation(topk)
+        proposals = proposals[topk]
+        proposals_scores = proposals_scores[topk]
         # get ground truths
         xml = ET.parse(self.annotations_paths[index])
-        width = xml.find('size').find('width')
-        height = xml.find('size').find('height')
+        width = int(xml.find('size').find('width').text)
+        height = int(xml.find('size').find('height').text)
         gt_boxes, gt_labels = [], []
         for obj in xml.findall('object'):
             if obj.find('difficult').text != '1':
@@ -84,16 +96,19 @@ class VOCDataset(Dataset):
         gt_labels = np.stack(gt_labels).astype(np.int32)
         # training
         if self.mode == 'TRAIN':
+            self.num_iters += 1
             # --preprocess image
             image = Image.open(self.imagepaths[index]).convert('RGB')
             assert image.width == width and image.height == height, 'something error when reading image or annotation'
             if random.random() > 0.5:
                 image = ImageOps.mirror(image)
-                proposals[: [0, 2]] = image.width - proposals[:, [2, 0]] - 1
                 gt_boxes[:, [0, 2]] = image.width - gt_boxes[:, [2, 0]] - 1
+                proposals[:, [0, 2]] = image.width - proposals[:, [2, 0]] - 1
+            if (self.max_image_size is None) or (self.num_iters % self.dataset_cfg['batch_size'] == 0):
+                self.max_image_size = random.choice(self.dataset_cfg['scales'])
             image, scale_factor, target_size = VOCDataset.preprocess(image=image,
                                                                      style=self.dataset_cfg['style'],
-                                                                     max_size=random.choice(self.dataset_cfg['scales']),
+                                                                     max_size=self.max_image_size,
                                                                      use_color_jitter=self.dataset_cfg['use_color_jitter'])
             # --correct gt_boxes and proposals
             proposals = proposals * scale_factor
@@ -101,10 +116,12 @@ class VOCDataset(Dataset):
             # --padding
             gt_boxes_padding = np.zeros((self.dataset_cfg['max_num_gt_boxes'], 4), dtype=np.float32)
             gt_boxes_padding[range(len(gt_boxes))[:self.dataset_cfg['max_num_gt_boxes']]] = gt_boxes[:self.dataset_cfg['max_num_gt_boxes']]
-            gt_labels_padding = np.zeros((self.dataset_cfg['max_num_gt_boxes'], 1), dtype=np.int32)
-            gt_labels_padding[range(len(gt_labels))[:self.dataset_cfg['max_num_gt_boxes']]] = gt_labels[:self.dataset_cfg['max_num_gt_boxes']]
+            # convert to one-hot
+            gt_labels_one_hot = np.full(20, 0, dtype=np.float32)
+            for label in gt_labels:
+                gt_labels_one_hot[label] = 1.0
             # --return the necessary data
-            return self.imageids[index], image, torch.from_numpy(proposals), torch.from_numpy(proposals_scores), torch.from_numpy(gt_labels_padding)
+            return int(self.imageids[index]), image, torch.from_numpy(proposals), torch.from_numpy(proposals_scores), torch.from_numpy(gt_labels_one_hot)
         # testing
         else:
             # --preprocess image (multi-scale testing by default for wsod)
@@ -124,12 +141,12 @@ class VOCDataset(Dataset):
                     images_list.append(image)
                     proposals = proposals_ori * scale_factor
                     if is_flip:
-                        proposals[: [0, 2]] = image.width - proposals[:, [2, 0]] - 1
+                        proposals[:, [0, 2]] = image.width - proposals[:, [2, 0]] - 1
                     proposals_list.append(proposals)
                     scale_factors_list.append(scale_factor)
                     proposals_scores_list.append(proposals_scores)
             # --return the necessary data
-            return self.imageids[index], images_list, proposals_list, proposals_scores_list, gt_boxes, gt_labels
+            return int(self.imageids[index]), images_list, proposals_list, proposals_scores_list, gt_boxes, gt_labels
     '''parse mat file'''
     def parseMATFile(self, filepath):
         data = loadmat(filepath)
@@ -147,8 +164,8 @@ class VOCDataset(Dataset):
         proposals_scores_filtered = []
         for imageid, imagepath, annpath, proposals_each, proposals_scores_each in zip(imageids, imagepaths, annotations_paths, proposals, proposals_scores):
             xml = ET.parse(annpath)
-            width = xml.find('size').find('width')
-            height = xml.find('size').find('height')
+            width = int(xml.find('size').find('width').text)
+            height = int(xml.find('size').find('height').text)
             gt_boxes = []
             for obj in xml.findall('object'):
                 if obj.find('difficult').text != '1':
@@ -225,6 +242,7 @@ class VOCDataset(Dataset):
         proposals_scores_batch = torch.stack(proposals_scores_batch, dim=0)
         gt_labels_batch = torch.stack(gt_labels_batch, dim=0)
         return imageid_batch, image_batch, proposals_batch, proposals_scores_batch, gt_labels_batch
+    '''evaluate mAP'''
     @staticmethod
     def evaluate():
         pass

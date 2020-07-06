@@ -15,11 +15,13 @@ BACKBONE_CFG = {
 PROPOSALS_CFG = {
     'train': {
                 'root_dir': 'proposals',
-                'filename': 'EdgeBoxesVOC2007trainval.mat'
+                'filename': 'EdgeBoxesVOC2007trainval.mat',
+                'num_proposals': 2000
             },
     'test': {
                 'root_dir': 'proposals',
-                'filename': 'EdgeBoxesVOC2007test.mat'
+                'filename': 'EdgeBoxesVOC2007test.mat',
+                'num_proposals': 2000
             }
 }
 # dataset
@@ -29,7 +31,7 @@ DATASET_CFG = {
     'num_classes': 20,
     'num_workers': 8,
     'pin_memory': True,
-    'batch_size': 16,
+    'batch_size': 8,
     'clsnamespath': 'names/voc.names',
     'use_color_jitter': False,
     'style': ['caffe', 'pytorch'][0],
@@ -38,18 +40,18 @@ DATASET_CFG = {
 }
 # loss function
 LOSS_CFG = {
-            
+            'cls_loss': {'type': 'binary_ce', 'binary_ce': {'size_average': True, 'weight': 1.0}}
         }
 # optimizer
 OPTIMIZER_CFG = {
     'type': 'sgd',
     'sgd': {
-            'learning_rates': [1e-5, 1e-6],
+            'learning_rates': [1e-4, 1e-5],
             'max_epochs': 20,
             'adjust_lr_epochs': [11],
-            'weight_decay': 1e-4,
+            'weight_decay': 5e-4,
             'momentum': 0.9,
-            'batch_size': 1,
+            'batch_size': DATASET_CFG['batch_size'],
             'is_use_warmup': True,
             'num_warmup_steps': 500,
             'grad_clip_max_norm': 35,

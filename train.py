@@ -8,6 +8,7 @@ import os
 import torch
 import warnings
 import argparse
+import torch.nn as nn
 from modules.utils import *
 from modules.optimizer import *
 from modules.WSDDN import WSDNNVGG
@@ -30,7 +31,7 @@ def train():
     # prepare base things
     args = parseArgs()
     cfg, cfg_file_path = getCfgByDatasetAndBackbone(datasetname=args.datasetname, backbonename=args.backbonename)
-    record_cfg = cfg.RECORD_CFG('train')
+    record_cfg = cfg.RECORD_CFG['train']
     checkDir(record_cfg['backupdir'])
     logger_handle = Logger(record_cfg['logfile'])
     use_cuda = torch.cuda.is_available()
@@ -39,7 +40,8 @@ def train():
     # prepare dataset
     if args.datasetname.upper() == 'VOC07':
         proposals_filepath = os.path.join(cfg.PROPOSALS_CFG['train']['root_dir'], cfg.PROPOSALS_CFG['train']['filename'])
-        dataset = VOCDataset(cfg.DATASET_CFG, proposals_filepath, 'TRAIN')
+        proposals_cfg = {'proposals_filepath': proposals_filepath, 'num_proposals': cfg.PROPOSALS_CFG['train']['num_proposals']}
+        dataset = VOCDataset(cfg.DATASET_CFG, proposals_cfg, 'TRAIN')
         dataloader_cfg = {'batch_size': cfg.DATASET_CFG['batch_size'],
                           'pin_memory': cfg.DATASET_CFG['pin_memory'],
                           'num_workers': cfg.DATASET_CFG['num_workers'],
@@ -57,7 +59,7 @@ def train():
     # prepare optimizer
     optimizer_cfg = cfg.OPTIMIZER_CFG[cfg.OPTIMIZER_CFG['type']]
     start_epoch = 1
-    end_epoch = optimizer_cfg['max_epoch']
+    end_epoch = optimizer_cfg['max_epochs']
     learning_rate_idx = 0
     if optimizer_cfg['is_use_warmup']:
         learning_rate = optimizer_cfg['learning_rates'][learning_rate_idx] / 3
@@ -69,7 +71,7 @@ def train():
                             'momentum': optimizer_cfg['momentum'],
                             'weight_decay': optimizer_cfg['weight_decay']
                         }
-        optimizer = SGDBuilder(model, optimizer_cfg, True)
+        optimizer = SGDBuilder(model, sgd_builder_cfg, True)
     else:
         raise ValueError('Unsupport optimizer type %s now...' % cfg.OPTIMIZER_CFG['type'])
     # check checkpoints path

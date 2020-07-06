@@ -7,6 +7,7 @@ Author:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from modules.losses import *
 from modules.backbones import *
 from libs.roi_pool.roi_pool import roi_pool
 from libs.roi_align.roi_align import roi_align
@@ -33,7 +34,7 @@ class WSDNNBase(nn.Module):
         # obtain features
         x = self.base_model(x)
         # roi pool/align
-        rois = torch.zeros(batch_size, proposals.size(1), 5)
+        rois = torch.zeros(batch_size, proposals.size(1), 5).type_as(proposals)
         for i in range(batch_size):
             rois[i, :, 0] = i
             rois[i, :, 1:] = proposals[i]
@@ -62,7 +63,14 @@ class WSDNNBase(nn.Module):
         if self.mode == 'TRAIN':
             image_level_scores = preds_cls.sum(1)
             image_level_scores = torch.clamp(image_level_scores, min=0.0, max=1.0)
-            loss_cls = F.binary_cross_entropy(image_level_scores, targets)
+            if self.cfg.LOSS_CFG['cls_loss']['type'] == 'binary_ce':
+                loss_cls = BinaryCrossEntropyLoss(preds=image_level_scores,
+                                                  targets=targets, 
+                                                  loss_weight=self.cfg.LOSS_CFG['cls_loss']['binary_ce']['weight'], 
+                                                  size_average=self.cfg.LOSS_CFG['cls_loss']['binary_ce']['size_average'], 
+                                                  avg_factor=batch_size)
+            else:
+                raise ValueError('Unsupport classification loss type %s...' % self.cfg.LOSS_CFG['cls_loss']['type'])
         # return necessary infos
         return preds_cls, loss_cls
     '''set bn fixed'''
@@ -83,8 +91,8 @@ class WSDNNBase(nn.Module):
 '''wsdnn using VGG as backbone'''
 class WSDNNVGG(WSDNNBase):
     stride = 16
-    def __init__(self, cfg, mode, **kwargs):
-        WSDNNVGG.__init__(self, cfg, mode, logger_handle)
+    def __init__(self, cfg, mode, logger_handle, **kwargs):
+        WSDNNBase.__init__(self, cfg, mode, logger_handle)
         # backbone network
         if self.mode == 'TRAIN':
             if cfg.BACKBONE_CFG['pretrained_model_path']:
